@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const JSZip = require('jszip');
+const JSZip = require(path.join(__dirname, '..', 'jszip.min.js'));
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4B, 0x03, 0x04]);
 
@@ -137,6 +137,38 @@ function isZipBase64(b64Str) {
   } catch (e) {
     return false;
   }
+}
+
+// ============ 暗桩（Canary）============
+function genCanaries(count) {
+  const canaries = [];
+  for (let i = 0; i < count; i++) {
+    canaries.push({ propName: '_$' + crypto.randomBytes(3).toString('hex'), value: crypto.randomInt(0x1000, 0xFFFF) });
+  }
+  return canaries;
+}
+
+// 解密器 IIFE 末尾设置暗桩变量
+function genCanarySetterCode(canaries) {
+  return canaries.map(c => `window[${strExpr(c.propName)}]=${c.value};`).join('');
+}
+
+// 暗桩检查代码（注入到 ZIP 内的 JS 文件）
+function genCanaryChecks(canaries) {
+  const checks = [];
+  for (let i = 0; i < canaries.length; i++) {
+    const c = canaries[i], p = strExpr(c.propName), d = crypto.randomInt(3000, 15000), t = i % 4;
+    if (t === 0) checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{document.documentElement.innerHTML="";}catch(e){}}},${d});`);
+    else if (t === 1) checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{location.href="about:blank";}catch(e){}}},${d});`);
+    else if (t === 2) checks.push(`try{if(window[${p}]!==${c.value})throw 0;}catch(e){setTimeout(function(){try{document.body.innerHTML="";}catch(e){}},${d});}`);
+    else checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{var _c=document.querySelector("canvas");if(_c)_c.getContext("2d").clearRect(0,0,99999,99999);}catch(e){}}},${d});`);
+  }
+  return checks;
+}
+
+// 在 JS 文件末尾追加暗桩检查（最安全的注入位置）
+function injectCanaryCheck(jsCode, check) {
+  return jsCode + ';\n' + check;
 }
 
 // ============ Proxy 解密器代码生成 ============
@@ -426,9 +458,16 @@ async function processHTML(inputPath, outputPath) {
   const newZip = new JSZip();
   const fileNames = Object.keys(zip.files);
 
+  // 生成暗桩
+  const CANARY_COUNT = crypto.randomInt(5, 9);
+  const canaries = genCanaries(CANARY_COUNT);
+  const canaryChecks = genCanaryChecks(canaries);
+  let canaryIdx = 0; // 轮流分配到不同 JS 文件
+
   let hashedCount = 0;
   let keptCount = 0;
   let resExpanded = 0;
+  let canaryInjected = 0;
 
   // 加密单个文件并加入 newZip
   function encryptAndAdd(name, contentBytes) {
@@ -469,8 +508,21 @@ async function processHTML(inputPath, outputPath) {
     }
 
     fileCount++;
+    // JS 文件：注入暗桩检查后再加密
+    if (name.endsWith('.js') && canaryIdx < canaryChecks.length) {
+      const jsCode = contentBytes.toString('utf8');
+      if (jsCode.length > 500) { // 只对有一定体积的 JS 注入（太小的可能不安全）
+        const modified = injectCanaryCheck(jsCode, canaryChecks[canaryIdx]);
+        encryptAndAdd(name, Buffer.from(modified, 'utf8'));
+        canaryIdx++;
+        canaryInjected++;
+        continue;
+      }
+    }
     encryptAndAdd(name, contentBytes);
   }
+
+  console.log(`  暗桩: ${canaryInjected} 个检查点注入到 ZIP 内 JS 文件`);
 
   // 生成蜜罐 trap 文件（随机 hash 名 + 随机密文，混入 ZIP 中与真实文件无法区分）
   const TRAP_COUNT = crypto.randomInt(3, 6); // 3-5 个蜜罐
@@ -508,11 +560,13 @@ async function processHTML(inputPath, outputPath) {
     + html.slice(zipMatch.index + full.length);
 
   // 注入 pako_inflate.min.js（独立块）
-  const pakoSrc = fs.readFileSync(path.join(__dirname, 'node_modules/pako/dist/pako_inflate.min.js'), 'utf8');
+  const pakoSrc = fs.readFileSync(path.join(__dirname, '..', 'pako_inflate.min.js'), 'utf8');
   const pakoScript = `<script>${pakoSrc}<\/script>`;
 
-  // 生成解密器
-  const decoderCode = genProxyDecoderCode(GLOBAL_SECRET, trapKeys);
+  // 生成解密器（末尾附加暗桩 setter）
+  let decoderCode = genProxyDecoderCode(GLOBAL_SECRET, trapKeys);
+  const canarySetters = genCanarySetterCode(canaries);
+  decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, canarySetters + '})();');
 
   // 交叉合并：解密器合并进包含 super_load 的游戏脚本块
   const scriptRegex = /<script([^>]*)>([\s\S]*?)<\/script>/gi;

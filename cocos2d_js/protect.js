@@ -106,6 +106,30 @@ function strExpr(str) {
 
 function rand(min, max) { return Math.floor(Math.random() * (max - min)) + min; }
 
+// ============ 暗桩（Canary）============
+function genCanaries(count) {
+  const canaries = [];
+  for (let i = 0; i < count; i++) canaries.push({ propName: '_$' + crypto.randomBytes(3).toString('hex'), value: crypto.randomInt(0x1000, 0xFFFF) });
+  return canaries;
+}
+function genCanarySetterCode(canaries) {
+  return canaries.map(c => `window[${strExpr(c.propName)}]=${c.value};`).join('');
+}
+function genCanaryChecks(canaries) {
+  const checks = [];
+  for (let i = 0; i < canaries.length; i++) {
+    const c = canaries[i], p = strExpr(c.propName), d = crypto.randomInt(3000, 15000), t = i % 4;
+    if (t === 0) checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{document.documentElement.innerHTML="";}catch(e){}}},${d});`);
+    else if (t === 1) checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{location.href="about:blank";}catch(e){}}},${d});`);
+    else if (t === 2) checks.push(`try{if(window[${p}]!==${c.value})throw 0;}catch(e){setTimeout(function(){try{document.body.innerHTML="";}catch(e){}},${d});}`);
+    else checks.push(`setTimeout(function(){if(window[${p}]!==${c.value}){try{var _c=document.querySelector("canvas");if(_c)_c.getContext("2d").clearRect(0,0,99999,99999);}catch(e){}}},${d});`);
+  }
+  return checks;
+}
+function injectCanaryCheck(jsCode, check) {
+  return jsCode + ';\n' + check;
+}
+
 // ============ XXTEA ============
 function xxteaEncryptU32(data, key) {
   const n = data.length;
@@ -523,6 +547,12 @@ async function main() {
     const zip = await JSZip.loadAsync(zipBytes);
     console.log(`  全局密钥: ${GLOBAL_SECRET.toString('hex')}`);
 
+    // 生成暗桩
+    const CANARY_COUNT = crypto.randomInt(5, 9);
+    const canaries = genCanaries(CANARY_COUNT);
+    const canaryChecks = genCanaryChecks(canaries);
+    let canaryIdx = 0, canaryInjected = 0;
+
     let fileCount = 0, totalSize = 0, totalEnc = 0, hashedCount = 0, keptCount = 0;
     const newZip = new JSZip();
     const fileNames = Object.keys(zip.files);
@@ -554,8 +584,18 @@ async function main() {
         continue;
       }
       fileCount++;
+      // JS 文件注入暗桩后再加密
+      if (name.endsWith('.js') && canaryIdx < canaryChecks.length && contentBytes.length > 500) {
+        const modified = injectCanaryCheck(contentBytes.toString('utf8'), canaryChecks[canaryIdx]);
+        encryptAndAdd(name, Buffer.from(modified, 'utf8'));
+        canaryIdx++;
+        canaryInjected++;
+        continue;
+      }
       encryptAndAdd(name, contentBytes);
     }
+
+    console.log(`  暗桩: ${canaryInjected} 个检查点注入到 ZIP 内 JS 文件`);
 
     // 蜜罐
     const trapKeys = [];
@@ -575,8 +615,10 @@ async function main() {
     const newB64 = newZipBytes.toString('base64');
     html = html.slice(0, zipMatch.index) + prefix + fullName + ' = "' + newB64 + '"' + html.slice(zipMatch.index + full.length);
 
-    // 生成解密器
+    // 生成解密器（末尾附加暗桩 setter）
     let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys);
+    const canarySetters = genCanarySetterCode(canaries);
+    decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, canarySetters + '})();');
 
     // 解密器先 VMP (high)
     if (useVmp && JavaScriptObfuscator) {
