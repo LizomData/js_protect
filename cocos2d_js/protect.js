@@ -163,21 +163,33 @@ function injectCanaryCheck(jsCode, check) {
   return jsCode + ';\n' + check;
 }
 
-// ============ XXTEA ============
+// ============ 魔改 XXTEA ============
+// 每次加密随机生成 DELTA + 4 个位移量（抛弃标准 0x9E3779B9 和 5/2/3/4）
+function genXxteaParams() {
+  return {
+    delta: (crypto.randomInt(0x10000000, 0x7FFFFFFF) | 1) >>> 0,
+    sh1: crypto.randomInt(3, 10),
+    sh2: crypto.randomInt(1, 6),
+    sh3: crypto.randomInt(2, 8),
+    sh4: crypto.randomInt(2, 9),
+  };
+}
+const XP = genXxteaParams();
+
 function xxteaEncryptU32(data, key) {
   const n = data.length;
   if (n < 2) return data;
   let z = data[n - 1], y, sum = 0, q = Math.floor(6 + 52 / n);
   while (q-- > 0) {
-    sum = (sum + DELTA) >>> 0;
+    sum = (sum + XP.delta) >>> 0;
     const e = (sum >>> 2) & 3;
     for (let p = 0; p < n - 1; p++) {
       y = data[p + 1];
-      data[p] = (data[p] + ((((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z)))) >>> 0;
+      data[p] = (data[p] + ((((z >>> XP.sh1) ^ (y << XP.sh2)) + ((y >>> XP.sh3) ^ (z << XP.sh4))) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z)))) >>> 0;
       z = data[p];
     }
     y = data[0];
-    data[n - 1] = (data[n - 1] + ((((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z)))) >>> 0;
+    data[n - 1] = (data[n - 1] + ((((z >>> XP.sh1) ^ (y << XP.sh2)) + ((y >>> XP.sh3) ^ (z << XP.sh4))) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z)))) >>> 0;
     z = data[n - 1];
   }
   return data;
@@ -415,14 +427,14 @@ function _hashName(str){
   return s1+s2;
 }
 
-var _DELTA=0x9E3779B9;
+var _DELTA=${XP.delta};
 function _xxteaDec(data,key){
   var n=data.length;if(n<2)return data;
   var y=data[0],z;var q=Math.floor(6+52/n);var sum=(q*_DELTA)>>>0;
   while(sum!==0){
     var e=(sum>>>2)&3;var p;
-    for(p=n-1;p>0;p--){z=data[p-1];var mx=(((z>>>5)^(y<<2))+((y>>>3)^(z<<4)))^((sum^y)+(key[(p&3)^e]^z));data[p]=(data[p]-mx)>>>0;y=data[p];}
-    z=data[n-1];var mx=(((z>>>5)^(y<<2))+((y>>>3)^(z<<4)))^((sum^y)+(key[(0&3)^e]^z));data[0]=(data[0]-mx)>>>0;y=data[0];
+    for(p=n-1;p>0;p--){z=data[p-1];var mx=(((z>>>${XP.sh1})^(y<<${XP.sh2}))+((y>>>${XP.sh3})^(z<<${XP.sh4})))^((sum^y)+(key[(p&3)^e]^z));data[p]=(data[p]-mx)>>>0;y=data[p];}
+    z=data[n-1];var mx=(((z>>>${XP.sh1})^(y<<${XP.sh2}))+((y>>>${XP.sh3})^(z<<${XP.sh4})))^((sum^y)+(key[(0&3)^e]^z));data[0]=(data[0]-mx)>>>0;y=data[0];
     sum=(sum-_DELTA)>>>0;
   }
   return data;

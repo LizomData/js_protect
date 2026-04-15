@@ -27,7 +27,20 @@ function strExpr(str) {
 
 // ============ XXTEA 算法 ============
 
-const DELTA = 0x9E3779B9;
+// 魔改 XXTEA：每次加密随机生成算法参数
+// 原 DELTA=0x9E3779B9（黄金比例，AI 易识别） + 固定位移 5/2/3/4
+// 魔改：DELTA 随机 32-bit 奇数 + 位移 4 个随机
+function genXxteaParams() {
+  return {
+    delta: (crypto.randomInt(0x10000000, 0x7FFFFFFF) | 1) >>> 0,  // 随机奇数
+    sh1: crypto.randomInt(3, 10),   // z>>>sh1
+    sh2: crypto.randomInt(1, 6),    // y<<sh2
+    sh3: crypto.randomInt(2, 8),    // y>>>sh3
+    sh4: crypto.randomInt(2, 9),    // z<<sh4
+  };
+}
+const XP = genXxteaParams();
+console.log(`  XXTEA 魔改参数: DELTA=0x${XP.delta.toString(16)}, shifts=[${XP.sh1},${XP.sh2},${XP.sh3},${XP.sh4}]`);
 
 function xxteaEncryptU32(data, key) {
   const n = data.length;
@@ -38,17 +51,17 @@ function xxteaEncryptU32(data, key) {
   let q = Math.floor(6 + 52 / n);
 
   while (q-- > 0) {
-    sum = (sum + DELTA) >>> 0;
+    sum = (sum + XP.delta) >>> 0;
     const e = (sum >>> 2) & 3;
     let p;
     for (p = 0; p < n - 1; p++) {
       y = data[p + 1];
-      const mx = (((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z));
+      const mx = (((z >>> XP.sh1) ^ (y << XP.sh2)) + ((y >>> XP.sh3) ^ (z << XP.sh4))) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z));
       data[p] = (data[p] + mx) >>> 0;
       z = data[p];
     }
     y = data[0];
-    const mx = (((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z));
+    const mx = (((z >>> XP.sh1) ^ (y << XP.sh2)) + ((y >>> XP.sh3) ^ (z << XP.sh4))) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z));
     data[n - 1] = (data[n - 1] + mx) >>> 0;
     z = data[n - 1];
   }
@@ -354,7 +367,7 @@ function _hashName(str){
   return s1+s2;
 }
 
-var _DELTA=0x9E3779B9;
+var _DELTA=${XP.delta};
 function _xxteaDec(data,key){
   var n=data.length;
   if(n<2)return data;
@@ -366,12 +379,12 @@ function _xxteaDec(data,key){
     var p;
     for(p=n-1;p>0;p--){
       z=data[p-1];
-      var mx=(((z>>>5)^(y<<2))+((y>>>3)^(z<<4)))^((sum^y)+(key[(p&3)^e]^z));
+      var mx=(((z>>>${XP.sh1})^(y<<${XP.sh2}))+((y>>>${XP.sh3})^(z<<${XP.sh4})))^((sum^y)+(key[(p&3)^e]^z));
       data[p]=(data[p]-mx)>>>0;
       y=data[p];
     }
     z=data[n-1];
-    var mx=(((z>>>5)^(y<<2))+((y>>>3)^(z<<4)))^((sum^y)+(key[(0&3)^e]^z));
+    var mx=(((z>>>${XP.sh1})^(y<<${XP.sh2}))+((y>>>${XP.sh3})^(z<<${XP.sh4})))^((sum^y)+(key[(0&3)^e]^z));
     data[0]=(data[0]-mx)>>>0;
     y=data[0];
     sum=(sum-_DELTA)>>>0;
