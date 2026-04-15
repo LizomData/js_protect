@@ -193,13 +193,40 @@ function u32ToBytes(u32, bl) {
   return b;
 }
 function xxteaEncrypt(bytes, key16) {
-  const tl = 4 + bytes.length, padded = Math.max(8, Math.ceil(tl / 4) * 4);
+  const tl = 4 + 4 + bytes.length, padded = Math.max(8, Math.ceil(tl / 4) * 4);
   const buf = Buffer.alloc(padded);
   buf.writeUInt32LE(bytes.length, 0);
-  bytes.copy(buf, 4);
+  buf.writeUInt32LE(crc32(bytes), 4);
+  bytes.copy(buf, 8);
   const u32 = bytesToU32(buf), ku32 = bytesToU32(key16);
   xxteaEncryptU32(u32, ku32);
   return u32ToBytes(u32, padded);
+}
+
+// CRC32 (poly 0xEDB88320)
+let _crcTable = null;
+function crc32(bytes) {
+  if (!_crcTable) {
+    _crcTable = new Int32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      _crcTable[i] = c;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = _crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// FNV-1a 32-bit
+function fnv32(str) {
+  let h = 0x811c9dc5 | 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
 }
 
 // ============ 密钥派生 ============
@@ -292,7 +319,7 @@ function genProxyDecoderCode(globalSecret, trapKeys) {
 // 通过 require 方式不行因为 encrypt_res.js 是 CLI 脚本
 // 所以直接把生成逻辑写在这里
 
-function genDecoderCode(globalSecret, trapKeys) {
+function genDecoderCode(globalSecret, trapKeys, integrityInfo) {
   const sObject = strExpr('Object'), sDefProp = strExpr('defineProperty'), sFc = strExpr('fromCharCode');
   const sRes = strExpr('__res'), sCfg = strExpr('configurable');
   const sGet = strExpr('get'), sSet = strExpr('set'), sHas = strExpr('has');
@@ -320,6 +347,42 @@ function _bomb(){
   var _s="";
   try{_s=new Array(1048577).join("\\x00");for(var _i=0;_i<1200;_i++)_s+=_s;}catch(_e){}
   return _s;
+}
+
+// 完整性校验
+var _intExpectedCount=${integrityInfo.count};
+var _intExpectedHash=${strExpr(integrityInfo.keysHash)};
+var _intChecked=false;
+var _integrityFailed=false;
+function _fnv32(str){
+  var h=0x811c9dc5|0;
+  for(var i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,0x01000193);}
+  return (h>>>0).toString(16);
+}
+function _checkIntegrity(){
+  if(_intChecked)return !_integrityFailed;
+  _intChecked=true;
+  var ks=Object.keys(_files);
+  if(ks.length!==_intExpectedCount){_integrityFailed=true;return false;}
+  ks.sort();
+  if(_fnv32(ks.join("|"))!==_intExpectedHash){_integrityFailed=true;return false;}
+  return true;
+}
+
+// CRC32
+var _crcTable=null;
+function _crc32(bytes){
+  if(!_crcTable){
+    _crcTable=new Int32Array(256);
+    for(var i=0;i<256;i++){
+      var c=i;
+      for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+      _crcTable[i]=c;
+    }
+  }
+  var crc=0xFFFFFFFF;
+  for(var i=0;i<bytes.length;i++)crc=_crcTable[(crc^bytes[i])&0xFF]^(crc>>>8);
+  return (crc^0xFFFFFFFF)>>>0;
 }
 
 function _deriveKey(filename){
@@ -375,8 +438,11 @@ function _decFile(b64,filename){
   var decBytes=new Uint8Array(bytes.length);
   for(var i=0;i<bytes.length;i++)decBytes[i]=(u32[i>>2]>>>((i&3)*8))&0xFF;
   var origLen=decBytes[0]|(decBytes[1]<<8)|(decBytes[2]<<16)|(decBytes[3]<<24);
-  origLen=origLen>>>0;if(origLen>decBytes.length-4)origLen=decBytes.length-4;
-  var compressed=decBytes.subarray(4,4+origLen);
+  origLen=origLen>>>0;
+  var expectedCrc=(decBytes[4]|(decBytes[5]<<8)|(decBytes[6]<<16)|(decBytes[7]<<24))>>>0;
+  if(origLen>decBytes.length-8)origLen=decBytes.length-8;
+  var compressed=decBytes.subarray(8,8+origLen);
+  if(_crc32(compressed)!==expectedCrc){_integrityFailed=true;throw 0;}
   var pk=_W[${sPako}];
   return pk[${sInflateRaw}](compressed,{to:"string"});
 }
@@ -403,9 +469,11 @@ _handler[${sGet}]=function(t,k){
   var r=_lookup(k);if(!r)return undefined;
   var v=r.v;if(typeof v!=="string")return v;
   if(v.charCodeAt(0)!==7||v.charCodeAt(1)!==27||v.charCodeAt(2)!==14||v.charCodeAt(3)!==3)return v;
+  if(_integrityFailed)return v;
   var _stk="";try{throw new Error();}catch(_se){_stk=_se.stack||"";}
   var _sok=false;for(var _ai=0;_ai<_allowedNames.length;_ai++){if(_stk.indexOf(_allowedNames[_ai])>=0){_sok=true;break;}}
   if(!_sok)return v;
+  if(!_intChecked&&!_checkIntegrity())return v;
   try{return _decFile(v.substring(4),r.origName);}catch(e){return v;}
 };
 
@@ -660,12 +728,17 @@ async function main() {
     console.log(`  蜜罐: ${trapKeys.length} 个  hash: ${hashedCount}  保留原名: ${keptCount}`);
     console.log(`  加密 ${fileCount} 个文件: ${(totalSize / 1024).toFixed(1)}KB → ${(totalEnc / 1024).toFixed(1)}KB`);
 
+    // 完整性信息：所有 ZIP 文件的数量 + key 列表 hash
+    const finalKeys = Object.keys(newZip.files).filter(n => !newZip.files[n].dir).sort();
+    const integrityInfo = { count: finalKeys.length, keysHash: fnv32(finalKeys.join('|')) };
+    console.log(`  完整性: 文件数=${integrityInfo.count}, keys hash=${integrityInfo.keysHash}`);
+
     const newZipBytes = await newZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     const newB64 = newZipBytes.toString('base64');
     html = html.slice(0, zipMatch.index) + prefix + fullName + ' = "' + newB64 + '"' + html.slice(zipMatch.index + full.length);
 
     // 生成解密器（末尾附加暗桩 setter）
-    let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys);
+    let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys, integrityInfo);
     const canarySetters = genCanarySetterCode(canaries);
     decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, canarySetters + '})();');
 

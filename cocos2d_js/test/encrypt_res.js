@@ -73,13 +73,40 @@ function u32ToBytes(u32, byteLen) {
   return bytes;
 }
 
-// 完整加密：bytes → 加 4字节长度头 → padding → XXTEA → 输出
+// CRC32 (poly 0xEDB88320, 标准实现)
+let _crcTable = null;
+function crc32(bytes) {
+  if (!_crcTable) {
+    _crcTable = new Int32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      _crcTable[i] = c;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = _crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// FNV-1a 32-bit (用于资源集合 hash)
+function fnv32(str) {
+  let h = 0x811c9dc5 | 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+// 完整加密：bytes → [4字节长度][4字节CRC32][明文][padding] → XXTEA → 输出
 function xxteaEncrypt(bytes, key16) {
-  const totalLen = 4 + bytes.length;
+  const totalLen = 4 + 4 + bytes.length; // length + crc + data
   const padded = Math.max(8, Math.ceil(totalLen / 4) * 4);
   const buf = Buffer.alloc(padded);
   buf.writeUInt32LE(bytes.length, 0);
-  bytes.copy(buf, 4);
+  buf.writeUInt32LE(crc32(bytes), 4);
+  bytes.copy(buf, 8);
   const u32 = bytesToU32(buf);
   const keyU32 = bytesToU32(key16);
   xxteaEncryptU32(u32, keyU32);
@@ -208,7 +235,7 @@ function injectCanaryCheck(jsCode, check) {
 
 // ============ Proxy 解密器代码生成 ============
 // 注意：依赖全局 pako（pako_inflate.min.js 之前已注入）
-function genProxyDecoderCode(globalSecret, trapKeys) {
+function genProxyDecoderCode(globalSecret, trapKeys, integrityInfo) {
   const sObject = strExpr('Object');
   const sDefProp = strExpr('defineProperty');
   const sFc = strExpr('fromCharCode');
@@ -250,6 +277,47 @@ function _bomb(){
   var _s="";
   try{_s=new Array(1048577).join("\\x00");for(var _i=0;_i<1200;_i++)_s+=_s;}catch(_e){}
   return _s;
+}
+
+// 完整性校验
+var _intExpectedCount=${integrityInfo.count};
+var _intExpectedHash=${strExpr(integrityInfo.keysHash)};
+var _intChecked=false;
+var _integrityFailed=false;
+
+// FNV-1a 32-bit
+function _fnv32(str){
+  var h=0x811c9dc5|0;
+  for(var i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,0x01000193);}
+  return (h>>>0).toString(16);
+}
+
+function _checkIntegrity(){
+  if(_intChecked)return !_integrityFailed;
+  _intChecked=true;
+  var ks=Object.keys(_files);
+  // 数量校验
+  if(ks.length!==_intExpectedCount){_integrityFailed=true;return false;}
+  // key 列表 hash 校验
+  ks.sort();
+  if(_fnv32(ks.join("|"))!==_intExpectedHash){_integrityFailed=true;return false;}
+  return true;
+}
+
+// CRC32 (poly 0xEDB88320)
+var _crcTable=null;
+function _crc32(bytes){
+  if(!_crcTable){
+    _crcTable=new Int32Array(256);
+    for(var i=0;i<256;i++){
+      var c=i;
+      for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+      _crcTable[i]=c;
+    }
+  }
+  var crc=0xFFFFFFFF;
+  for(var i=0;i<bytes.length;i++)crc=_crcTable[(crc^bytes[i])&0xFF]^(crc>>>8);
+  return (crc^0xFFFFFFFF)>>>0;
 }
 
 function _deriveKey(filename){
@@ -342,10 +410,14 @@ function _decFile(b64,filename){
   for(var i=0;i<bytes.length;i++){
     decBytes[i]=(u32[i>>2]>>>((i&3)*8))&0xFF;
   }
+  // [4字节长度][4字节CRC32][压缩明文][padding]
   var origLen=decBytes[0]|(decBytes[1]<<8)|(decBytes[2]<<16)|(decBytes[3]<<24);
   origLen=origLen>>>0;
-  if(origLen>decBytes.length-4)origLen=decBytes.length-4;
-  var compressed=decBytes.subarray(4,4+origLen);
+  var expectedCrc=(decBytes[4]|(decBytes[5]<<8)|(decBytes[6]<<16)|(decBytes[7]<<24))>>>0;
+  if(origLen>decBytes.length-8)origLen=decBytes.length-8;
+  var compressed=decBytes.subarray(8,8+origLen);
+  // 校验 CRC32（密文被篡改 → CRC 不匹配）
+  if(_crc32(compressed)!==expectedCrc){_integrityFailed=true;throw 0;}
   // inflateRaw → 字符串
   var pk=_W[${sPako}];
   return pk[${sInflateRaw}](compressed,{to:"string"});
@@ -400,12 +472,16 @@ _handler[${sGet}]=function(t,k){
   if(typeof v!=="string")return v;
   // 检查 magic prefix → 加密资源，否则原样返回（inline 明文直接放行）
   if(v.charCodeAt(0)!==7||v.charCodeAt(1)!==27||v.charCodeAt(2)!==14||v.charCodeAt(3)!==3)return v;
+  // 完整性已失败 → 返回密文
+  if(_integrityFailed)return v;
   // 栈帧检查：非合法调用方直接返回原密文（含 magic prefix），不解密
   var _stk="";
   try{throw new Error();}catch(_se){_stk=_se.stack||"";}
   var _sok=false;
   for(var _ai=0;_ai<_allowedNames.length;_ai++){if(_stk.indexOf(_allowedNames[_ai])>=0){_sok=true;break;}}
   if(!_sok)return v;
+  // 首次解密前做集合校验
+  if(!_intChecked&&!_checkIntegrity())return v;
   try{
     return _decFile(v.substring(4),r.origName);
   }catch(e){
@@ -618,8 +694,13 @@ async function processHTML(inputPath, outputPath) {
   const pakoSrc = fs.readFileSync(path.join(__dirname, '..', 'pako_inflate.min.js'), 'utf8');
   const pakoScript = `<script>${pakoSrc}<\/script>`;
 
+  // 计算资源完整性信息
+  const finalKeys = Object.keys(newZip.files).filter(n => !newZip.files[n].dir).sort();
+  const integrityInfo = { count: finalKeys.length, keysHash: fnv32(finalKeys.join('|')) };
+  console.log(`  完整性: 文件数=${integrityInfo.count}, keys hash=${integrityInfo.keysHash}`);
+
   // 生成解密器（末尾附加暗桩 setter）
-  let decoderCode = genProxyDecoderCode(GLOBAL_SECRET, trapKeys);
+  let decoderCode = genProxyDecoderCode(GLOBAL_SECRET, trapKeys, integrityInfo);
   const canarySetters = genCanarySetterCode(canaries);
   decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, canarySetters + '})();');
 
