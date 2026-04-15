@@ -106,6 +106,39 @@ function strExpr(str) {
 
 function rand(min, max) { return Math.floor(Math.random() * (max - min)) + min; }
 
+// ============ 提取 HTML 中的 inline window.__res ============
+function extractInlineRes(html) {
+  const re = /window\s*(?:\.\s*__res|\[\s*['"]__res['"]\s*\])\s*=\s*\{/g;
+  let m, best = null;
+  while ((m = re.exec(html)) !== null) {
+    const start = m.index + m[0].length - 1;
+    let depth = 0, end = -1, inStr = false, esc = false, quote = null;
+    for (let i = start; i < html.length; i++) {
+      const ch = html[i];
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === quote) { inStr = false; quote = null; }
+        continue;
+      }
+      if (ch === '"' || ch === "'") { inStr = true; quote = ch; continue; }
+      if (ch === '{') depth++;
+      if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+    }
+    if (end < 0) continue;
+    const objStr = html.substring(start, end);
+    let obj;
+    try { obj = new Function('return ' + objStr)(); } catch (e) { continue; }
+    if (!obj || typeof obj !== 'object') continue;
+    let trailEnd = end;
+    while (trailEnd < html.length && /\s/.test(html[trailEnd])) trailEnd++;
+    if (html[trailEnd] === ';') trailEnd++;
+    const size = Object.keys(obj).length;
+    if (!best || size > best.size) best = { obj, fullStart: m.index, fullEnd: trailEnd, size };
+  }
+  return best;
+}
+
 // ============ 暗桩（Canary）============
 function genCanaries(count) {
   const canaries = [];
@@ -534,6 +567,13 @@ async function main() {
   // ========== 步骤 1: 加密资源 ==========
   console.log('=== 步骤 1: 加密 Cocos2d 资源 ===');
 
+  // 提取并移除 HTML 中的 inline window.__res = {...}
+  const inlineRes = extractInlineRes(html);
+  if (inlineRes) {
+    console.log(`  发现 inline window.__res: ${inlineRes.size} 个资源 → 合并进 ZIP`);
+    html = html.slice(0, inlineRes.fullStart) + 'window.__res={};' + html.slice(inlineRes.fullEnd);
+  }
+
   const pattern = /(\s*;?\s*)(window\.\w+)\s*=\s*"([A-Za-z0-9+/=]{100,})"/g;
   let zipMatch = null, m;
   while ((m = pattern.exec(html)) !== null) {
@@ -546,6 +586,15 @@ async function main() {
     const zipBytes = Buffer.from(value, 'base64');
     const zip = await JSZip.loadAsync(zipBytes);
     console.log(`  全局密钥: ${GLOBAL_SECRET.toString('hex')}`);
+
+    // 把 inline 资源合并进 zip
+    if (inlineRes) {
+      let merged = 0;
+      for (const [k, v] of Object.entries(inlineRes.obj)) {
+        if (typeof v === 'string') { zip.file(k, v); merged++; }
+      }
+      console.log(`  合并 ${merged} 个 inline 资源到 ZIP`);
+    }
 
     // 生成暗桩
     const CANARY_COUNT = crypto.randomInt(5, 9);

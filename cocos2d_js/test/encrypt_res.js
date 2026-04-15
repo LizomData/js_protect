@@ -139,6 +139,41 @@ function isZipBase64(b64Str) {
   }
 }
 
+// ============ 提取 HTML 中的 inline window.__res ============
+function extractInlineRes(html) {
+  const re = /window\s*(?:\.\s*__res|\[\s*['"]__res['"]\s*\])\s*=\s*\{/g;
+  let m, best = null;
+  while ((m = re.exec(html)) !== null) {
+    const start = m.index + m[0].length - 1; // 指向 {
+    let depth = 0, end = -1, inStr = false, esc = false, quote = null;
+    for (let i = start; i < html.length; i++) {
+      const ch = html[i];
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === quote) { inStr = false; quote = null; }
+        continue;
+      }
+      if (ch === '"' || ch === "'") { inStr = true; quote = ch; continue; }
+      if (ch === '{') depth++;
+      if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+    }
+    if (end < 0) continue;
+    const objStr = html.substring(start, end);
+    let obj;
+    try { obj = new Function('return ' + objStr)(); } catch (e) { continue; }
+    if (!obj || typeof obj !== 'object') continue;
+    let trailEnd = end;
+    while (trailEnd < html.length && /\s/.test(html[trailEnd])) trailEnd++;
+    if (html[trailEnd] === ';') trailEnd++;
+    const size = Object.keys(obj).length;
+    if (!best || size > best.size) {
+      best = { obj, fullStart: m.index, fullEnd: trailEnd, size };
+    }
+  }
+  return best;
+}
+
 // ============ 暗桩（Canary）============
 function genCanaries(count) {
   const canaries = [];
@@ -427,7 +462,15 @@ try{
 
 async function processHTML(inputPath, outputPath) {
   console.log('读取文件:', inputPath);
-  const html = fs.readFileSync(inputPath, 'utf8');
+  let html = fs.readFileSync(inputPath, 'utf8');
+  const origSize = Buffer.byteLength(html);
+
+  // 提取并移除 HTML 中的 inline window.__res = {...}
+  const inlineRes = extractInlineRes(html);
+  if (inlineRes) {
+    console.log(`发现 inline window.__res: ${inlineRes.size} 个资源 → 合并进 ZIP`);
+    html = html.slice(0, inlineRes.fullStart) + 'window.__res={};' + html.slice(inlineRes.fullEnd);
+  }
 
   const pattern = /(\s*;?\s*)(window\.\w+)\s*=\s*"([A-Za-z0-9+/=]{100,})"/g;
   let zipMatch = null;
@@ -448,6 +491,18 @@ async function processHTML(inputPath, outputPath) {
 
   console.log('解压 ZIP...');
   const zip = await JSZip.loadAsync(zipBytes);
+
+  // 把 inline 资源合并进 zip 对象
+  if (inlineRes) {
+    let merged = 0;
+    for (const [k, v] of Object.entries(inlineRes.obj)) {
+      if (typeof v === 'string') {
+        zip.file(k, v);
+        merged++;
+      }
+    }
+    console.log(`  合并 ${merged} 个 inline 资源到 ZIP`);
+  }
 
   console.log(`全局密钥: ${GLOBAL_SECRET.toString('hex')}`);
   console.log('每个文件: deflateRaw → XXTEA(filename派生密钥) → base64');
@@ -610,7 +665,7 @@ async function processHTML(inputPath, outputPath) {
 
   fs.writeFileSync(outputPath, output, 'utf8');
   console.log(`\n输出: ${outputPath}`);
-  console.log(`大小: ${(Buffer.byteLength(html) / 1024).toFixed(1)}KB → ${(Buffer.byteLength(output) / 1024).toFixed(1)}KB`);
+  console.log(`大小: ${(origSize / 1024).toFixed(1)}KB → ${(Buffer.byteLength(output) / 1024).toFixed(1)}KB`);
   console.log('完成！');
 }
 
