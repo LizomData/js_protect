@@ -632,6 +632,20 @@ async function main() {
   let html = fs.readFileSync(inputFile, 'utf8');
   const origSize = Buffer.byteLength(html);
 
+  // 提前提取跳转保护 URL（合并到解密器一起 VMP）
+  let redirectInfo = null;
+  if (useRedirect) {
+    let redirectUrl = flags.redirectUrl;
+    if (!redirectUrl) {
+      const found = await extractStoreUrl(html);
+      if (found.length > 0) redirectUrl = found[0];
+    }
+    if (redirectUrl) {
+      if (!/^https?:\/\//i.test(redirectUrl)) redirectUrl = 'https://' + redirectUrl;
+      redirectInfo = { url: redirectUrl, rate: redirectRate };
+    }
+  }
+
   // ========== 步骤 1: 加密资源 ==========
   console.log('=== 步骤 1: 加密 Cocos2d 资源 ===');
 
@@ -737,10 +751,18 @@ async function main() {
     const newB64 = newZipBytes.toString('base64');
     html = html.slice(0, zipMatch.index) + prefix + fullName + ' = "' + newB64 + '"' + html.slice(zipMatch.index + full.length);
 
-    // 生成解密器（末尾附加暗桩 setter）
+    // 生成解密器（末尾附加暗桩 setter + 跳转保护 hook）
     let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys, integrityInfo);
     const canarySetters = genCanarySetterCode(canaries);
-    decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, canarySetters + '})();');
+    let trailing = canarySetters + '})();';
+    if (redirectInfo) {
+      // 跳转保护 IIFE 嵌入解密器外层 IIFE 之前的位置（同一 <script> 块）
+      console.log(`  跳转保护合并: ${redirectInfo.url} (概率 ${redirectInfo.rate}%)`);
+      const hookCode = genRedirectCode(redirectInfo.url, redirectInfo.rate);
+      decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, trailing) + hookCode;
+    } else {
+      decoderCode = decoderCode.replace(/\}\)\(\);?\s*$/, trailing);
+    }
 
     // 解密器先 VMP (high)
     if (useVmp && JavaScriptObfuscator) {
@@ -792,41 +814,12 @@ async function main() {
     console.log('  资源加密完成');
   }
 
-  // ========== 步骤 2: 链接跳转保护 ==========
-  if (useRedirect) {
-    console.log('\n=== 步骤 2: 链接跳转保护 ===');
-    let redirectUrl = flags.redirectUrl;
-    if (!redirectUrl) {
-      const found = await extractStoreUrl(fs.readFileSync(inputFile, 'utf8'));
-      if (found.length > 0) {
-        redirectUrl = found[0];
-        console.log(`  自动提取: ${redirectUrl}`);
-      }
-    }
-    if (redirectUrl) {
-      if (!/^https?:\/\//i.test(redirectUrl)) redirectUrl = 'https://' + redirectUrl;
-      console.log(`  保护链接: ${redirectUrl}  概率: ${redirectRate}%`);
-      const hookCode = genRedirectCode(redirectUrl, redirectRate);
-      const hookScript = `<script>${hookCode}<\/script>`;
-      const bodyMatch = html.match(/<body[^>]*>/i);
-      if (bodyMatch) {
-        const idx = bodyMatch.index + bodyMatch[0].length;
-        html = html.slice(0, idx) + hookScript + html.slice(idx);
-      } else {
-        html = hookScript + html;
-      }
-      console.log('  跳转保护注入完成');
-    } else {
-      console.log('  未找到商店链接，跳过');
-    }
-  }
-
-  // ========== 步骤 3: JS 全混淆 ==========
+  // ========== 步骤 2: JS 全混淆 ==========
   if (useObf) {
     if (!JavaScriptObfuscator) {
-      console.log('\n=== 步骤 3: JS 全混淆（跳过：javascript-obfuscator 未找到）===');
+      console.log('\n=== 步骤 2: JS 全混淆（跳过：javascript-obfuscator 未找到）===');
     } else {
-      console.log(`\n=== 步骤 3: JS 全混淆 (${obfPreset}) ===`);
+      console.log(`\n=== 步骤 2: JS 全混淆 (${obfPreset}) ===`);
       const cfg = OBF_PRESETS[obfPreset] || OBF_PRESETS.low;
       html = obfuscateHtml(html, cfg);
       console.log('  混淆完成');
