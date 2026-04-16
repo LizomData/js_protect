@@ -47,6 +47,37 @@ const ZIP_MAGIC = Buffer.from([0x50, 0x4B, 0x03, 0x04]);
 const DELTA = 0x9E3779B9;
 const HEAVY_THRESHOLD = 500 * 1024;
 
+// 视觉同形词典：ASCII + 西里尔同形 + 零宽连接符
+// 首字符：拉丁 / 西里尔大小写同形 (合法 ID_Start)
+// 中间：上述 + ASCII 混淆数字 + ZWJ/ZWNJ (合法 ID_Continue，肉眼不可见)
+function genConfusingDict(count = 30000) {
+  const firstSet = [
+    'I', 'l', 'O', 'o', '_', '$',
+    '\u0430', '\u0435', '\u043E', '\u0440', '\u0441', '\u0445', '\u0443', // а е о р с х у
+    '\u0410', '\u0415', '\u041E', '\u0420', '\u0421', '\u0425', // А Е О Р С Х
+  ];
+  const midSet = [
+    'I', 'l', '1', 'O', '0', 'o', '_',
+    '\u0430', '\u0435', '\u043E', '\u0440', '\u0441', '\u0445', '\u0443',
+  ];
+  const zeroWidth = ['\u200C', '\u200D']; // ZWNJ / ZWJ — 不可见
+  const set = new Set();
+  while (set.size < count) {
+    const len = crypto.randomInt(7, 11);
+    let s = firstSet[crypto.randomInt(0, firstSet.length)];
+    for (let i = 1; i < len; i++) {
+      // 20% 概率塞一个零宽字符（不能放在末尾，避免某些解析器异常）
+      if (i < len - 1 && crypto.randomInt(0, 100) < 20) {
+        s += zeroWidth[crypto.randomInt(0, zeroWidth.length)];
+      }
+      s += midSet[crypto.randomInt(0, midSet.length)];
+    }
+    set.add(s);
+  }
+  return Array.from(set);
+}
+const _CONFUSING_DICT = genConfusingDict();
+
 const OBF_PRESETS = {
   low: {
     compact: true, simplify: true, target: 'browser',
@@ -62,7 +93,8 @@ const OBF_PRESETS = {
   },
   medium: {
     compact: true, simplify: true, target: 'browser',
-    identifierNamesGenerator: 'hexadecimal',
+    identifierNamesGenerator: 'dictionary',
+    identifiersDictionary: _CONFUSING_DICT,
     stringArray: true, stringArrayThreshold: 0.75, stringArrayEncoding: ['rc4'],
     stringArrayRotate: true, stringArrayShuffle: true,
     stringArrayCallsTransform: true, stringArrayIndexShift: true,
@@ -79,7 +111,8 @@ const OBF_PRESETS = {
   },
   high: {
     compact: true, simplify: true, target: 'browser',
-    identifierNamesGenerator: 'hexadecimal',
+    identifierNamesGenerator: 'dictionary',
+    identifiersDictionary: _CONFUSING_DICT,
     stringArray: true, stringArrayThreshold: 1, stringArrayEncoding: ['rc4'],
     stringArrayRotate: true, stringArrayShuffle: true,
     stringArrayCallsTransform: true, stringArrayIndexShift: true,
