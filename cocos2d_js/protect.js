@@ -371,6 +371,15 @@ function genDecoderCode(globalSecret, trapKeys, integrityInfo) {
   const sDelP = strExpr('deleteProperty'), sOwnKeys = strExpr('ownKeys');
   const sGetOwnPD = strExpr('getOwnPropertyDescriptor');
   const sPako = strExpr('pako'), sInflateRaw = strExpr('inflateRaw');
+  const sNativeCode = strExpr('native code');
+  const sHeadless = strExpr('HeadlessChrome'), sPhantom = strExpr('PhantomJS');
+  const sUaKey = strExpr('userAgent'), sWdKey = strExpr('webdriver');
+  const sLsKey = strExpr('localStorage'), sOwKey = strExpr('outerWidth');
+  const sRafKey = strExpr('requestAnimationFrame'), sHtmlElKey = strExpr('HTMLElement');
+  const sCanvasKey = strExpr('canvas'), s2dKey = strExpr('2d');
+  const sCeKey = strExpr('createElement'), sGcKey = strExpr('getContext');
+  const sFsKey = strExpr('fillStyle'), sFrKey = strExpr('fillRect'), sGidKey = strExpr('getImageData');
+  const sColorKey = strExpr('#A1B2C3');
   const xk = crypto.randomInt(50, 200);
   const secretEncoded = Array.from(globalSecret).map(b => b ^ xk);
 
@@ -399,6 +408,26 @@ var _intExpectedCount=${integrityInfo.count};
 var _intExpectedHash=${strExpr(integrityInfo.keysHash)};
 var _intChecked=false;
 var _integrityFailed=false;
+function _checkEnv(){
+  try{if(window!==window.top){try{void window.top.location.href;_integrityFailed=true;return;}catch(e){}}}catch(e){}
+  try{if(Proxy.toString().indexOf(${sNativeCode})<0){_integrityFailed=true;return;}}catch(e){_integrityFailed=true;return;}
+  try{if(atob.toString().indexOf(${sNativeCode})<0){_integrityFailed=true;return;}}catch(e){_integrityFailed=true;return;}
+  if(typeof window!=="object"||typeof document!=="object"||typeof navigator!=="object"){_integrityFailed=true;return;}
+  try{if(typeof window[${sLsKey}]==="undefined"){_integrityFailed=true;return;}}catch(e){_integrityFailed=true;return;}
+  var _ua=navigator[${sUaKey}];
+  if(typeof _ua!=="string"||_ua.length<10||_ua.indexOf(${sHeadless})>=0||_ua.indexOf(${sPhantom})>=0){_integrityFailed=true;return;}
+  try{if(navigator[${sWdKey}]===true){_integrityFailed=true;return;}}catch(e){}
+  try{
+    var _cv=document[${sCeKey}](${sCanvasKey});var _gx=_cv[${sGcKey}](${s2dKey});
+    if(!_gx){_integrityFailed=true;return;}
+    _cv.width=2;_cv.height=2;_gx[${sFsKey}]=${sColorKey};_gx[${sFrKey}](0,0,2,2);
+    var _px=_gx[${sGidKey}](0,0,1,1);
+    if(_px.data[0]!==161||_px.data[1]!==178||_px.data[2]!==195){_integrityFailed=true;return;}
+  }catch(e){_integrityFailed=true;return;}
+  if(typeof window[${sRafKey}]!=="function"||typeof window[${sHtmlElKey}]!=="function"){_integrityFailed=true;return;}
+  if(!window[${sOwKey}]||window[${sOwKey}]<=0){_integrityFailed=true;return;}
+}
+_checkEnv();
 function _fnv32(str){
   var h=0x811c9dc5|0;
   for(var i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,0x01000193);}
