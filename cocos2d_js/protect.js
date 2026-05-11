@@ -34,6 +34,13 @@ const _dir = __dirname;
 const JSZip = require(path.join(_dir, 'jszip.min.js'));
 const PAKO_INFLATE_SRC = fs.readFileSync(path.join(_dir, 'pako_inflate.min.js'), 'utf8');
 
+let _jimpMod = null;
+let _jimpClass = null;
+try {
+  _jimpMod = require(path.join(_dir, 'jimp.bundle.js'));
+  _jimpClass = _jimpMod;
+} catch(e) {}
+
 let JavaScriptObfuscator;
 try {
   global.self = global;
@@ -170,6 +177,50 @@ function extractInlineRes(html) {
     if (!best || size > best.size) best = { obj, fullStart: m.index, fullEnd: trailEnd, size };
   }
   return best;
+}
+
+// ============ 图片像素采样（jimp） ============
+function _isImageContent(buf) {
+  if (!buf || buf.length < 8) return false;
+  if (buf[0] === 0x89 && buf[1] === 0x50) return true; // PNG
+  if (buf[0] === 0xFF && buf[1] === 0xD8) return true; // JPEG
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf.length > 12 && buf.slice(8, 12).toString('ascii') === 'WEBP') return true;
+  const prefix = buf.slice(0, 20).toString('latin1');
+  if (prefix.startsWith('data:image')) return true;
+  return false;
+}
+
+async function computePixelSamples(contentBytes) {
+  if (!_jimpClass || !_jimpMod) return null;
+  try {
+    let imgBuffer = contentBytes;
+    const prefix = contentBytes.slice(0, 20).toString('latin1');
+    if (prefix.startsWith('data:image')) {
+      const commaIdx = contentBytes.indexOf(44);
+      if (commaIdx < 0) return null;
+      imgBuffer = Buffer.from(contentBytes.slice(commaIdx + 1).toString('ascii'), 'base64');
+    }
+    const img = await _jimpClass.read(imgBuffer);
+    const w = img.width, h = img.height;
+    if (w < 4 || h < 4) return null;
+    const pts = [
+      [Math.floor(w / 4), Math.floor(h / 4)],
+      [Math.floor(3 * w / 4), Math.floor(h / 4)],
+      [Math.floor(w / 2), Math.floor(h / 2)],
+      [Math.floor(w / 4), Math.floor(3 * h / 4)],
+      [Math.floor(3 * w / 4), Math.floor(3 * h / 4)],
+    ];
+    const samples = [];
+    for (const [px, py] of pts) {
+      const x = Math.min(Math.max(px, 0), w - 1);
+      const y = Math.min(Math.max(py, 0), h - 1);
+      const rgba = _jimpMod.intToRGBA(img.getPixelColor(x, y));
+      samples.push(rgba.r, rgba.g, rgba.b);
+    }
+    return samples;
+  } catch(e) {
+    return null;
+  }
 }
 
 // ============ 暗桩（Canary）============
@@ -364,7 +415,8 @@ function genProxyDecoderCode(globalSecret, trapKeys) {
 // 通过 require 方式不行因为 encrypt_res.js 是 CLI 脚本
 // 所以直接把生成逻辑写在这里
 
-function genDecoderCode(globalSecret, trapKeys, integrityInfo) {
+function genDecoderCode(globalSecret, trapKeys, integrityInfo, pixelSamples) {
+  if (!pixelSamples) pixelSamples = {};
   const sObject = strExpr('Object'), sDefProp = strExpr('defineProperty'), sFc = strExpr('fromCharCode');
   const sRes = strExpr('__res'), sCfg = strExpr('configurable');
   const sGet = strExpr('get'), sSet = strExpr('set'), sHas = strExpr('has');
@@ -380,6 +432,15 @@ function genDecoderCode(globalSecret, trapKeys, integrityInfo) {
   const sCeKey = strExpr('createElement'), sGcKey = strExpr('getContext');
   const sFsKey = strExpr('fillStyle'), sFrKey = strExpr('fillRect'), sGidKey = strExpr('getImageData');
   const sColorKey = strExpr('#A1B2C3');
+  const sHtmlImgEl = strExpr('HTMLImageElement');
+  const sSrcProp = strExpr('src'), sDataImg = strExpr('data:image');
+  const sLoad = strExpr('load'), sComplete = strExpr('complete');
+  const sNatW = strExpr('naturalWidth'), sNatH = strExpr('naturalHeight');
+  const sDraw = strExpr('drawImage'), sRemEL = strExpr('removeEventListener');
+  const sAddEvent = strExpr('addEventListener');
+  const psCode = Object.entries(pixelSamples).map(([name, samples]) =>
+    `_ps[${strExpr(name)}]=[${samples.join(',')}];`
+  ).join('');
   const xk = crypto.randomInt(50, 200);
   const secretEncoded = Array.from(globalSecret).map(b => b ^ xk);
 
@@ -392,6 +453,9 @@ var _S=String;
 var _fc=_S[${sFc}];
 var _gs=[${secretEncoded.join(',')}].map(function(c){return c^${xk};});
 var _files=Object.create(null);
+var _d2n=Object.create(null);
+var _ps=Object.create(null);
+${psCode}
 
 var _trapSet=Object.create(null);
 var _trapKeys=[${trapKeys.map(k => strExpr(k)).join(',')}];
@@ -432,6 +496,26 @@ function _fnv32(str){
   var h=0x811c9dc5|0;
   for(var i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,0x01000193);}
   return (h>>>0).toString(16);
+}
+function _sig(s){return _fnv32(s.slice(0,200));}
+function _checkPixels(_img,_smp){
+  try{
+    var _cv=document[${sCeKey}](${sCanvasKey});
+    _cv.width=_img[${sNatW}];_cv.height=_img[${sNatH}];
+    var _gx=_cv[${sGcKey}](${s2dKey});
+    _gx[${sDraw}](_img,0,0);
+    var _w=_cv.width,_h=_cv.height;
+    if(_w<4||_h<4){return;}
+    var _pts=[[_w>>2,_h>>2],[(3*_w)>>2,_h>>2],[_w>>1,_h>>1],[_w>>2,(3*_h)>>2],[(3*_w)>>2,(3*_h)>>2]];
+    for(var _pi=0;_pi<5;_pi++){
+      var _px=_gx[${sGidKey}](_pts[_pi][0],_pts[_pi][1],1,1);
+      var _si=_pi*3;
+      if(Math.abs(_px.data[0]-_smp[_si])>30||Math.abs(_px.data[1]-_smp[_si+1])>30||Math.abs(_px.data[2]-_smp[_si+2])>30){
+        console.error("[integrity] pixel mismatch at pt"+_pi+": got ["+_px.data[0]+","+_px.data[1]+","+_px.data[2]+"] expected ["+_smp[_si]+","+_smp[_si+1]+","+_smp[_si+2]+"]");
+        _integrityFailed=true;return;
+      }
+    }
+  }catch(e){}
 }
 function _checkIntegrity(){
   if(_intChecked)return !_integrityFailed;
@@ -542,13 +626,18 @@ _handler[${sGet}]=function(t,k){
   }
   var r=_lookup(k);if(!r)return undefined;
   var v=r.v;if(typeof v!=="string")return v;
-  if(v.charCodeAt(0)!==7||v.charCodeAt(1)!==27||v.charCodeAt(2)!==14||v.charCodeAt(3)!==3)return v;
+  if(v.charCodeAt(0)!==7||v.charCodeAt(1)!==27||v.charCodeAt(2)!==14||v.charCodeAt(3)!==3){
+    if(_ps[r.origName]&&v.indexOf(${sDataImg})===0){_d2n[_sig(v)]=r.origName;}
+    return v;
+  }
   if(_integrityFailed)return v;
   var _stk="";try{throw new Error();}catch(_se){_stk=_se.stack||"";}
   var _sok=false;for(var _ai=0;_ai<_allowedNames.length;_ai++){if(_stk.indexOf(_allowedNames[_ai])>=0){_sok=true;break;}}
   if(!_sok)return v;
   if(!_intChecked&&!_checkIntegrity())return v;
-  try{return _decFile(v.substring(4),r.origName);}catch(e){return v;}
+  var _dr;try{_dr=_decFile(v.substring(4),r.origName);}catch(e){return v;}
+  if(_ps[r.origName]&&typeof _dr==="string"&&_dr.indexOf(${sDataImg})===0){_d2n[_sig(_dr)]=r.origName;}
+  return _dr;
 };
 
 _handler[${sSet}]=function(t,k,v){_files[k]=v;return true;};
@@ -556,6 +645,34 @@ _handler[${sDelP}]=function(t,k){delete _files[k];return true;};
 _handler[${sHas}]=function(t,k){return !!_lookup(k);};
 _handler[${sOwnKeys}]=function(t){return Object.keys(_files);};
 _handler[${sGetOwnPD}]=function(t,k){if(k in _files)return {enumerable:true,configurable:true,value:undefined};return undefined;};
+
+try{
+  var _imgP=_W[${sHtmlImgEl}]&&_W[${sHtmlImgEl}].prototype;
+  if(_imgP){
+    var _sdsc=_O[${sGetOwnPD}](_imgP,${sSrcProp});
+    if(_sdsc&&_sdsc[${sSet}]){
+      var _osg=_sdsc[${sGet}],_oss=_sdsc[${sSet}];
+      _dp(_imgP,${sSrcProp},{
+        get:function(){return _osg.call(this);},
+        set:function(v){
+          _oss.call(this,v);
+          if(typeof v==="string"&&v.indexOf(${sDataImg})===0){
+            var _sg=_sig(v),_on=_d2n[_sg];
+            if(_on&&_ps[_on]){
+              var _ti=this,_sp=_ps[_on];
+              if(_ti[${sComplete}]){_checkPixels(_ti,_sp);}
+              else{
+                var _ld=function(){_checkPixels(_ti,_sp);_ti[${sRemEL}](${sLoad},_ld);};
+                _ti[${sAddEvent}](${sLoad},_ld);
+              }
+            }
+          }
+        },
+        configurable:true,enumerable:true
+      });
+    }
+  }
+}catch(e){}
 
 var _proxy=new Proxy({},_handler);
 try{
@@ -759,6 +876,7 @@ async function main() {
     let canaryIdx = 0, canaryInjected = 0;
 
     let fileCount = 0, totalSize = 0, totalEnc = 0, hashedCount = 0, keptCount = 0;
+    const pixelSamples = {};
     const newZip = new JSZip();
     const fileNames = Object.keys(zip.files);
 
@@ -782,7 +900,13 @@ async function main() {
         try {
           const resObj = JSON.parse(contentBytes.toString('utf8'));
           const keys = Object.keys(resObj);
-          for (const rk of keys) encryptAndAdd(rk, Buffer.from(resObj[rk], 'utf8'));
+          for (const rk of keys) {
+            const rkBuf = Buffer.from(resObj[rk], 'utf8');
+            if (Jimp && _isImageContent(rkBuf)) {
+              try { const s = await computePixelSamples(rkBuf); if (s) pixelSamples[rk] = s; } catch(e) {}
+            }
+            encryptAndAdd(rk, rkBuf);
+          }
           console.log(`  __res 拆解: ${keys.length} 个内联资源`);
         } catch (e) { encryptAndAdd(name, contentBytes); }
         fileCount++;
@@ -796,6 +920,9 @@ async function main() {
         canaryIdx++;
         canaryInjected++;
         continue;
+      }
+      if (_jimpClass && _isImageContent(contentBytes)) {
+        try { const s = await computePixelSamples(contentBytes); if (s) pixelSamples[name] = s; } catch(e) {}
       }
       encryptAndAdd(name, contentBytes);
     }
@@ -826,7 +953,11 @@ async function main() {
     html = html.slice(0, zipMatch.index) + prefix + fullName + ' = "' + newB64 + '"' + html.slice(zipMatch.index + full.length);
 
     // 生成解密器（末尾附加暗桩 setter + 跳转保护 hook）
-    let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys, integrityInfo);
+    const psCount = Object.keys(pixelSamples).length;
+    if (psCount > 0) console.log(`  像素采样: ${psCount} 张图片`);
+    else if (_jimpClass) console.log('  像素采样: 未检测到图片文件');
+    else console.log('  像素采样: jimp 未安装，跳过');
+    let decoderCode = genDecoderCode(GLOBAL_SECRET, trapKeys, integrityInfo, pixelSamples);
     const canarySetters = genCanarySetterCode(canaries);
     let trailing = canarySetters + '})();';
     if (redirectInfo) {
