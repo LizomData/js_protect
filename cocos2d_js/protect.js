@@ -938,7 +938,7 @@ async function main() {
           const keys = Object.keys(resObj);
           for (const rk of keys) {
             const rkBuf = Buffer.from(resObj[rk], 'utf8');
-            if (Jimp && _isImageContent(rkBuf)) {
+            if (_jimpClass && _isImageContent(rkBuf)) {
               try { const s = await computePixelSamples(rkBuf); if (s) pixelSamples[rk] = s; } catch(e) {}
             }
             encryptAndAdd(rk, rkBuf);
