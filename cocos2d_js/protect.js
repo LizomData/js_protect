@@ -482,6 +482,7 @@ var _intChecked=false;
 var _integrityFailed=false;
 function _fail(){
   _integrityFailed=true;
+  if(Math.random()>0.2)return false;
   try{
     var _stop=function(e){try{e.preventDefault();e.stopImmediatePropagation();}catch(_e){}return false;};
     var _ev=["click","touchstart","touchend","pointerdown","pointerup","mousedown","mouseup","keydown"];
