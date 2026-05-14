@@ -626,8 +626,6 @@ function _decFile(b64,filename){
   return pk[${sInflateRaw}](compressed,{to:"string"});
 }
 
-var _allowedNames=[${strExpr('super_eval')},${strExpr('super_boot')},${strExpr('super_load')},${strExpr('super_reg_search')},${strExpr('getRes')},${strExpr('super_html')}];
-
 function _normName(k){return _pa[k]||k;}
 function _rememberData(k,v){
   if(typeof v==="string"&&v.indexOf(${sDataImg})===0){
@@ -659,9 +657,6 @@ _handler[${sGet}]=function(t,k){
     return v;
   }
   if(_integrityFailed)return v;
-  var _stk="";try{throw new Error();}catch(_se){_stk=_se.stack||"";}
-  var _sok=false;for(var _ai=0;_ai<_allowedNames.length;_ai++){if(_stk.indexOf(_allowedNames[_ai])>=0){_sok=true;break;}}
-  if(!_sok)return v;
   if(!_intChecked&&!_checkIntegrity())return v;
   var _dr;try{_dr=_decFile(v.substring(4),r.origName);}catch(e){return v;}
   _rememberData(r.origName,_dr);
