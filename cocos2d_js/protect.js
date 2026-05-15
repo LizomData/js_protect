@@ -438,14 +438,16 @@ function genDecoderCode(globalSecret, trapKeys, integrityInfo, pixelSamples) {
   const sNatW = strExpr('naturalWidth'), sNatH = strExpr('naturalHeight');
   const sDraw = strExpr('drawImage'), sRemEL = strExpr('removeEventListener');
   const sAddEvent = strExpr('addEventListener'), sGetResFn = strExpr('getRes');
-  const psCode = Object.entries(pixelSamples).map(([name, samples]) =>
-    `_ps[${strExpr(name)}]=[${samples.join(',')}];`
-  ).join('');
+  const psCode = Object.entries(pixelSamples).map(([name, samples]) => {
+    const h = hashName(name);
+    return `_ps["${h}"]=[${samples.join(',')}];`;
+  }).join('');
   const psAliasCode = Object.keys(pixelSamples).flatMap(name => {
+    const h = hashName(name);
     const base = name.split('/').pop();
     const stem = base.replace(/\.(png|jpg|jpeg|webp)$/i, '');
     const parts = [name, base, stem];
-    return [...new Set(parts.filter(Boolean))].map(alias => `_pa[${strExpr(alias)}]=${strExpr(name)};`);
+    return [...new Set(parts.filter(Boolean))].map(alias => `_pa["${hashName(alias)}"]="${h}";`);
   }).join('');
   const xk = crypto.randomInt(50, 200);
   const secretEncoded = Array.from(globalSecret).map(b => b ^ xk);
@@ -627,7 +629,7 @@ function _decFile(b64,filename){
   return pk[${sInflateRaw}](compressed,{to:"string"});
 }
 
-function _normName(k){return _pa[k]||k;}
+function _normName(k){var h=_hashName(k);return _pa[h]||h;}
 function _rememberData(k,v){
   if(typeof v==="string"&&v.indexOf(${sDataImg})===0){
     var _n=_normName(k);
@@ -635,10 +637,10 @@ function _rememberData(k,v){
   }
 }
 function _lookup(k){
-  var v=_files[k];if(v!==undefined&&v!==null)return {v:v,origName:_normName(k)};
-  v=_files[_hashName(k)];if(v!==undefined&&v!==null)return {v:v,origName:_normName(k)};
+  var v=_files[k];if(v!==undefined&&v!==null)return {v:v,origName:k};
+  var h=_hashName(k);v=_files[h];if(v!==undefined&&v!==null)return {v:v,origName:h};
   var idx=0;
-  while((idx=k.indexOf("/",idx+1))>0){var suffix=k.substring(idx+1);if(suffix.length>0){v=_files[_hashName(suffix)];if(v!==undefined&&v!==null)return {v:v,origName:_normName(suffix)};}}
+  while((idx=k.indexOf("/",idx+1))>0){var suffix=k.substring(idx+1);if(suffix.length>0){var sh=_hashName(suffix);v=_files[sh];if(v!==undefined&&v!==null)return {v:v,origName:sh};}}
   return null;
 }
 
@@ -918,12 +920,13 @@ async function main() {
 
     function encryptAndAdd(name, contentBytes) {
       const keepName = shouldKeepOriginalName(name);
+      const keyName = keepName ? name : hashName(name);
       const compressed = zlib.deflateRawSync(contentBytes, { level: 9 });
-      const fileKey = deriveKey(GLOBAL_SECRET, name);
+      const fileKey = deriveKey(GLOBAL_SECRET, keyName);
       const encrypted = xxteaEncrypt(compressed, fileKey);
       const b64 = '\x07\x1B\x0E\x03' + encrypted.toString('base64');
       totalEnc += b64.length;
-      newZip.file(keepName ? name : hashName(name), b64);
+      newZip.file(keyName, b64);
       if (keepName) keptCount++; else hashedCount++;
     }
 
